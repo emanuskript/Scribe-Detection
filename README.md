@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 ### 2. Install requirements.txt.
 
-### 3. Run app.py.
+### 3. Run app.py
 
 ### 4. Upload manuscript image, lines will be segmented and will be shown for selection to filter noisy input.
    ![image](https://github.com/user-attachments/assets/20512c20-84fa-4cc5-bda3-efdd8b04f2b0)
