@@ -9,6 +9,7 @@ First, make sure all necessary dependencies are installed. To do this, run the f
 
 ```bash
 pip install -r requirements.txt
+```
 
 1. Install requirements.txt
 2. Run app.py
