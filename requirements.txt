@@ -1,0 +1,10 @@
+coremltools
+Flask
+kraken
+numpy
+pillow
+scikit-image
+scikit-learn
+scipy
+opencv-python
+matplotlib
