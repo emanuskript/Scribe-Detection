@@ -1,108 +1,195 @@
-import cv2 as cv
+# pre_processor.py
+"""
+Preprocessing for manuscript pages:
+1) Grayscale
+2) Illumination/background correction
+3) Small-angle deskew (±5°)
+4) Sauvola adaptive binarization
+
+Primary entry point: preprocess(bgr_img) -> bw uint8 (0 or 255)
+Optional: preprocess_debug(bgr_img) -> dict of intermediate stages
+"""
+
+from __future__ import annotations
+import cv2
 import numpy as np
-import matplotlib.pyplot as plt
+from typing import Dict, Tuple
 
-from utils.utils import *
-from utils.constants import *
+try:
+    from skimage.filters import threshold_sauvola
+    _HAS_SAUVOLA = True
+except Exception:
+    _HAS_SAUVOLA = False
 
 
-class PreProcessor:
-    @staticmethod
-    def process(gray_img: np.ndarray) -> (np.ndarray, np.ndarray):
-        """
-        Pre-processes the IAM form image and extracts the handwritten paragraph only.
+# -------------------------------
+# Utilities
+# -------------------------------
 
-        :param gray_img:    the IAM form image to be processed.
-        :return:            pre-processed gray and binary images of the handwritten paragraph.
-        """
+def _ensure_odd(n: int) -> int:
+    return int(n + (n % 2 == 0))
 
-        # Resize image.
-        # height, width = gray_img.shape
-        # limit = 1000
-        # if height > limit:
-        #     ratio = limit / height
-        #     gray_img = cv.resize(gray_img, (0, 0), fx=ratio, fy=ratio)
+def to_gray(img: np.ndarray) -> np.ndarray:
+    """Convert BGR/RGB to single-channel grayscale (uint8)."""
+    if img.ndim == 3:
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return img
 
-        # Reduce image noise.
-        #gray_img = cv.GaussianBlur(gray_img, (5, 5), 0)
-        
-        # Initial cropping.
-        #l_padding = 150
-        #r_padding = 50
-        #gray_img = gray_img[:, l_padding:-r_padding]
-        
-        # Binarize the image.
-        thresh, bin_img = cv.threshold(gray_img, 0, 255, cv.THRESH_BINARY_INV + cv.THRESH_OTSU)
+def _auto_kernel_size(shape: Tuple[int, int], frac: float = 0.035, min_ks: int = 21, max_ks: int = 151) -> int:
+    """
+    Choose an odd kernel size as a fraction of the smaller image dimension.
+    Good defaults for background estimation on manuscript scans.
+    """
+    h, w = shape[:2]
+    base = int(min(h, w) * frac)
+    base = np.clip(base, min_ks, max_ks)
+    return _ensure_odd(base)
 
-        # Crop page header and footer and keep only the handwritten area.
-        #gray_img, bin_img = PreProcessor._crop_paragraph(gray_img, bin_img)
+# -------------------------------
+# Illumination / background correction
+# -------------------------------
 
-        # Return pre processed images.
-        return gray_img, bin_img
+def illumination_correct(gray: np.ndarray, method: str = "morph_open", frac: float = 0.035) -> np.ndarray:
+    """
+    Remove slow-varying background (parchment shading) and normalize contrast.
+    method:
+      - "morph_open": morphological opening to estimate background (default; robust)
+      - "gauss": large Gaussian blur as background estimate (faster fallback)
+    """
+    gray = gray if gray.dtype == np.uint8 else cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    ks = _auto_kernel_size(gray.shape, frac=frac)
 
-    @staticmethod
-    def _crop_paragraph(gray_img: np.ndarray, bin_img: np.ndarray) -> (np.ndarray, np.ndarray):
-        """
-        Detects the bounding box of the handwritten paragraph of the given IAM form image
-        and returns a cropped image of it.
+    if method == "gauss":
+        bg = cv2.GaussianBlur(gray, (ks, ks), 0)
+    else:
+        # morphological opening with an elliptical kernel approximates background
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ks, ks))
+        bg = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
 
-        :param gray_img:    the IAM form image to be processed.
-        :param bin_img:     binarized IAM form image to be processed.
-        :return:            cropped gray and binary images of the handwritten paragraph.
-        """
+    corrected = cv2.subtract(gray, bg)
+    # stretch to full range
+    corrected = cv2.normalize(corrected, None, 0, 255, cv2.NORM_MINMAX)
+    return corrected
 
-        # Get image dimensions.
-        height, width = gray_img.shape
+# -------------------------------
+# Small-angle deskew
+# -------------------------------
 
-        # Find all contours in the page.
-        contours, hierarchy = cv.findContours(bin_img, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+def _estimate_small_skew_angle(gray: np.ndarray, max_angle: float = 5.0) -> float:
+    """
+    Estimate small skew (±max_angle degrees) using Hough on Canny edges.
+    Works best if illumination-corrected. Returns 0.0 if not enough evidence.
+    """
+    # scale down for speed & stability in Hough
+    h, w = gray.shape[:2]
+    scale = 1200.0 / max(h, w) if max(h, w) > 1200 else 1.0
+    small = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-        # Minimum contour width to be considered as the black separator line.
-        threshold_width = 1000
-        line_offset = 10
+    edges = cv2.Canny(small, 50, 150)
+    lines = cv2.HoughLines(edges, 1, np.pi / 1800, max(200, int(0.15 * edges.size / 1000)))
+    if lines is None:
+        return 0.0
 
-        # Page paragraph boundaries.
-        up, down, left, right = 0, height - 1, 0, width - 1
+    angles = []
+    for rho_theta in lines[:300]:
+        for _, theta in rho_theta:
+            # Convert to degrees; text lines are ~ horizontal (theta ~ 0 or ~pi)
+            angle = (theta * 180.0 / np.pi) - 90.0
+            # keep only near-horizontal angles
+            if -max_angle <= angle <= max_angle:
+                angles.append(angle)
 
-        # Detect the main horizontal black separator lines of the IAM handwriting forms.
-        for cnt in contours:
-            x, y, w, h = cv.boundingRect(cnt)
+    if not angles:
+        return 0.0
+    return float(np.median(angles))
 
-            if w < threshold_width:
-                continue
+def deskew_small(gray: np.ndarray, max_angle: float = 5.0, border_value: int = 255) -> Tuple[np.ndarray, float]:
+    """
+    Rotate image by a small estimated angle; returns (rotated, angle_degrees).
+    """
+    angle = _estimate_small_skew_angle(gray, max_angle=max_angle)
+    if abs(angle) < 0.05:  # negligible
+        return gray, 0.0
+    h, w = gray.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+    rot = cv2.warpAffine(gray, M, (w, h), flags=cv2.INTER_LINEAR, borderValue=border_value)
+    return rot, angle
 
-            if y < height // 2:
-                up = max(up, y + h + line_offset)
-            else:
-                down = min(down, y - line_offset)
+# -------------------------------
+# Binarization (Sauvola with fallback)
+# -------------------------------
 
-        # Apply erosion to remove noise and dots.
-        kernel = np.ones((3, 3), np.uint8)
-        eroded_img = cv.erode(bin_img, kernel, iterations=2)
+def binarize_sauvola(gray: np.ndarray, window: int = 31, k: float = 0.2) -> np.ndarray:
+    """
+    Sauvola adaptive threshold; returns binary uint8 image {0,255}.
+    If skimage is missing, falls back to OpenCV adaptive mean thresholding.
+    """
+    if _HAS_SAUVOLA:
+        # skimage expects float or uint; we'll pass uint8; it computes fine.
+        t = threshold_sauvola(gray, window_size=_ensure_odd(window), k=k)
+        bw = (gray > t).astype(np.uint8) * 255
+        return bw
+    else:
+        # Fallback: not identical to Sauvola, but reasonable
+        win = _ensure_odd(window)
+        bw = cv2.adaptiveThreshold(
+            gray,
+            maxValue=255,
+            adaptiveMethod=cv2.ADAPTIVE_THRESH_MEAN_C,
+            thresholdType=cv2.THRESH_BINARY,
+            blockSize=win,
+            C=10
+        )
+        return bw
 
-        # Get horizontal and vertical histograms.
-        hor_hist = np.sum(eroded_img, axis=1) / 255
-        ver_hist = np.sum(eroded_img, axis=0) / 255
+# -------------------------------
+# Main entry points
+# -------------------------------
 
-        # Detect paragraph white padding.
-        while left < right and ver_hist[left] == 0:
-            left += 1
-        while right > left and ver_hist[right] == 0:
-            right -= 1
-        while up < down and hor_hist[up] == 0:
-            up += 1
-        while down > up and hor_hist[down] == 0:
-            down -= 1
+def preprocess(bgr_img: np.ndarray,
+               illum_method: str = "morph_open",
+               illum_frac: float = 0.035,
+               do_deskew: bool = True,
+               sauvola_window: int = 31,
+               sauvola_k: float = 0.2) -> np.ndarray:
+    """
+    Full pipeline → returns a binary image (uint8 with values {0, 255}).
+    Parameters are tuned for manuscript pages; adjust if needed.
+    """
+    gray = to_gray(bgr_img)
+    corrected = illumination_correct(gray, method=illum_method, frac=illum_frac)
+    if do_deskew:
+        corrected, _ = deskew_small(corrected, max_angle=5.0, border_value=255)
+    bw = binarize_sauvola(corrected, window=sauvola_window, k=sauvola_k)
+    return bw
 
-        # Display bounding box on the handwritten paragraph.
-        if DEBUG_PARAGRAPH_SEGMENTATION:
-            img = cv.cvtColor(gray_img, cv.COLOR_GRAY2BGR)
-            cv.rectangle(img, (left, up), (right, down), (0, 0, 255), 3)
-            display_image('Handwritten Paragraph', img)
+def preprocess_debug(bgr_img: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    Debug version returning intermediate stages for QA/visualization.
+    Keys: 'gray', 'illum', 'deskew', 'bw'. Also returns 'angle' (float).
+    """
+    out: Dict[str, np.ndarray] = {}
+    gray = to_gray(bgr_img)
+    out["gray"] = gray
 
-        # Crop images.
-        gray_img = gray_img[up:down + 1, left:right + 1]
-        bin_img = bin_img[up:down + 1, left:right + 1]
+    illum = illumination_correct(gray, method="morph_open", frac=0.035)
+    out["illum"] = illum
 
-        # Return the handwritten paragraph
-        return gray_img, bin_img
+    deskewed, angle = deskew_small(illum, max_angle=5.0, border_value=255)
+    out["deskew"] = deskewed
+    out["angle"] = np.array([angle], dtype=np.float32)  # store angle as small array for convenience
+
+    bw = binarize_sauvola(deskewed, window=31, k=0.2)
+    out["bw"] = bw
+    return out
+
+
+# Optional explicit exports
+__all__ = [
+    "preprocess",
+    "preprocess_debug",
+    "to_gray",
+    "illumination_correct",
+    "deskew_small",
+    "binarize_sauvola",
+]

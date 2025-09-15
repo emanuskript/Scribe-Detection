@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Scribe Detection – Results</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 24px; }
+    .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .panel { border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
+    .img-wrap { position: relative; width: 100%; }
+    .img-wrap img { width: 100%; display: block; border-radius: 8px; }
+    canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 24px; align-items: start; }
+    .thumb { border: 1px solid #eee; padding: 6px; border-radius: 8px; background: #fafafa; }
+    .score { height: 10px; background: #eee; border-radius: 6px; overflow: hidden; margin: 6px 0 10px; }
+    .score > div { height: 100%; background: #2e7d32; }
+    .reason { font-size: 14px; color: #333; line-height: 1.35; }
+    h3 { margin: 8px 0 12px; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <div class="panel">
+      <h3>Segmentation</h3>
+      <div class="muted">Animating detected lines on the uploaded page.</div>
+      <div class="img-wrap" id="imgWrap">
+        <img id="pageImg" src="{{ url_for('static', filename=page_image) }}" alt="page">
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Suspected scribe changes</h3>
+      {% if cards %}
+        {% for c in cards %}
+          <div class="pair">
+            <div class="thumb">
+              <img src="{{ url_for('static', filename=c.left) }}" alt="line A" style="width:100%;">
+            </div>
+            <div class="thumb">
+              <img src="{{ url_for('static', filename=c.right) }}" alt="line B" style="width:100%;">
+            </div>
+            <div style="grid-column: 1 / span 2;">
+              <div class="muted">Certainty: {{ c.score }}%</div>
+              <div class="score"><div style="width: {{ c.score }}%"></div></div>
+              <div class="reason">{{ c.reason|safe }}</div>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p>No strong scribe change detected. Try a different page or reduce illumination/skew.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <script>
+    // Animate line boundaries on a canvas overlay
+    const polygons = {{ polygons|safe }};
+    const img = document.getElementById('pageImg');
+    const canvas = document.getElementById('overlay');
+    const wrap = document.getElementById('imgWrap');
+
+    function resizeCanvas() {
+      canvas.width = img.clientWidth;
+      canvas.height = img.clientHeight;
+    }
+
+    function drawPoly(ctx, poly, scaleX, scaleY) {
+      if (!poly || poly.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(poly[0][0]*scaleX, poly[0][1]*scaleY);
+      for (let i = 1; i < poly.length; i++) {
+        ctx.lineTo(poly[i][0]*scaleX, poly[i][1]*scaleY);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    function animatePolys() {
+      const naturalW = img.naturalWidth || img.width;
+      const naturalH = img.naturalHeight || img.height;
+      const scaleX = canvas.width / naturalW;
+      const scaleY = canvas.height / naturalH;
+
+      const ctx = canvas.getContext('2d');
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(0, 180, 255, 0.85)';
+
+      let i = 0;
+      function step() {
+        if (i >= polygons.length) return;
+        drawPoly(ctx, polygons[i], scaleX, scaleY);
+        i += 1;
+        setTimeout(step, 120); // speed of animation (ms per line)
+      }
+      step();
+    }
+
+    img.addEventListener('load', () => {
+      resizeCanvas();
+      animatePolys();
+    });
+    window.addEventListener('resize', resizeCanvas);
+  </script>
+</body>
+</html>

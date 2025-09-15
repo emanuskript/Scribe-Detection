@@ -56,6 +56,7 @@
     <h1>Segmentation Results</h1>
     <h2>Cropped Line Images:</h2>
     <form action="{{ url_for('save_selected_images') }}" method="POST">
+        <input type="hidden" name="job_id" value="{{ job_id }}">
         <table>
             <tr>
                 {% for line in cropped_images %}
